@@ -96,7 +96,7 @@ struct request {
 	u64         flash_io_latency; //save mmc host command latency
 #endif /*VENDOR_EDIT*/
 	union {
-		struct call_single_data csd;
+		call_single_data_t csd;
 		u64 fifo_time;
 	};
 
