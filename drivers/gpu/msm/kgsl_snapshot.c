@@ -1189,7 +1189,7 @@ int kgsl_device_snapshot_init(struct kgsl_device *device)
 	device->snapshot_faultcount = 0;
 	device->force_panic = 0;
 	device->prioritize_unrecoverable = true;
-	device->snapshot_crashdumper = 1;
+	device->snapshot_crashdumper = 0;
 	device->snapshot_legacy = 0;
 #ifdef VENDOR_EDIT
 //wenhua.Leng@PSW.MM.Display.GPU.minidump,2019-04-21
