@@ -1246,6 +1246,75 @@ out:
 }
 EXPORT_SYMBOL(ib_resolve_eth_dmac);
 
+/**
+ * ib_modify_qp_with_udata - Modifies the attributes for the specified QP.
+ * @ib_qp: The QP to modify.
+ * @attr: On input, specifies the QP attributes to modify.  On output,
+ *   the current values of selected QP attributes are returned.
+ * @attr_mask: A bit-mask used to specify which attributes of the QP
+ *   are being modified.
+ * @udata: pointer to user's input output buffer information
+ *   are being modified.
+ * It returns 0 on success and returns appropriate error code on error.
+ */
+int ib_modify_qp_with_udata(struct ib_qp *ib_qp, struct ib_qp_attr *attr,
+			    int attr_mask, struct ib_udata *udata)
+{
+	return _ib_modify_qp(ib_qp->real_qp, attr, attr_mask, udata);
+}
+EXPORT_SYMBOL(ib_modify_qp_with_udata);
+
+int ib_get_eth_speed(struct ib_device *dev, u8 port_num, u8 *speed, u8 *width)
+{
+	int rc;
+	u32 netdev_speed;
+	struct net_device *netdev;
+	struct ethtool_link_ksettings lksettings;
+
+	if (rdma_port_get_link_layer(dev, port_num) != IB_LINK_LAYER_ETHERNET)
+		return -EINVAL;
+
+	netdev = ib_device_get_netdev(dev, port_num);
+	if (!netdev)
+		return -ENODEV;
+
+	rtnl_lock();
+	rc = __ethtool_get_link_ksettings(netdev, &lksettings);
+	rtnl_unlock();
+
+	dev_put(netdev);
+
+	if (!rc && lksettings.base.speed != (u32)SPEED_UNKNOWN) {
+		netdev_speed = lksettings.base.speed;
+	} else {
+		netdev_speed = SPEED_1000;
+		pr_warn("%s speed is unknown, defaulting to %d\n", netdev->name,
+			netdev_speed);
+	}
+
+	if (netdev_speed <= SPEED_1000) {
+		*width = IB_WIDTH_1X;
+		*speed = IB_SPEED_SDR;
+	} else if (netdev_speed <= SPEED_10000) {
+		*width = IB_WIDTH_1X;
+		*speed = IB_SPEED_FDR10;
+	} else if (netdev_speed <= SPEED_20000) {
+		*width = IB_WIDTH_4X;
+		*speed = IB_SPEED_DDR;
+	} else if (netdev_speed <= SPEED_25000) {
+		*width = IB_WIDTH_1X;
+		*speed = IB_SPEED_EDR;
+	} else if (netdev_speed <= SPEED_40000) {
+		*width = IB_WIDTH_4X;
+		*speed = IB_SPEED_FDR10;
+	} else {
+		*width = IB_WIDTH_4X;
+		*speed = IB_SPEED_EDR;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(ib_get_eth_speed);
 
 int ib_modify_qp(struct ib_qp *qp,
 		 struct ib_qp_attr *qp_attr,
