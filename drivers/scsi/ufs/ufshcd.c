@@ -915,7 +915,17 @@ static void ufshcd_print_tmrs(struct ufs_hba *hba, unsigned long bitmap)
 
 static void ufshcd_print_fsm_state(struct ufs_hba *hba)
 {
+
 	int err = 0, tx_fsm_val = 0, rx_fsm_val = 0;
+	int rc = 0;
+	bool flush_result;
+	unsigned long flags;
+
+	if (!ufshcd_is_clkgating_allowed(hba))
+		goto out;
+	spin_lock_irqsave(hba->host->host_lock, flags);
+	hba->clk_gating.active_reqs++;
+
 
 	err = ufshcd_dme_get(hba,
 			UIC_ARG_MIB_SEL(MPHY_TX_FSM_STATE,
@@ -931,10 +941,63 @@ static void ufshcd_print_fsm_state(struct ufs_hba *hba)
 			rx_fsm_val, err);
 }
 
+
 static void ufshcd_print_host_state(struct ufs_hba *hba)
 {
 	if (!(hba->ufshcd_dbg_print & UFSHCD_DBG_PRINT_HOST_STATE_EN))
 		return;
+
+start:
+	switch (hba->clk_gating.state) {
+	case CLKS_ON:
+		/*
+		 * Wait for the ungate work to complete if in progress.
+		 * Though the clocks may be in ON state, the link could
+		 * still be in hibner8 state if hibern8 is allowed
+		 * during clock gating.
+		 * Make sure we exit hibern8 state also in addition to
+		 * clocks being ON.
+		 */
+		if (ufshcd_can_hibern8_during_gating(hba) &&
+		    ufshcd_is_link_hibern8(hba)) {
+			if (async) {
+				rc = -EAGAIN;
+				hba->clk_gating.active_reqs--;
+				break;
+			}
+			spin_unlock_irqrestore(hba->host->host_lock, flags);
+			flush_result = flush_work(&hba->clk_gating.ungate_work);
+			if (hba->clk_gating.is_suspended && !flush_result)
+				goto out;
+			spin_lock_irqsave(hba->host->host_lock, flags);
+			goto start;
+		}
+		break;
+	case REQ_CLKS_OFF:
+		if (cancel_delayed_work(&hba->clk_gating.gate_work)) {
+			hba->clk_gating.state = CLKS_ON;
+			break;
+		}
+		/*
+		 * If we here, it means gating work is either done or
+		 * currently running. Hence, fall through to cancel gating
+		 * work and to enable clocks.
+		 */
+	case CLKS_OFF:
+		scsi_block_requests(hba->host);
+		hba->clk_gating.state = REQ_CLKS_ON;
+		schedule_work(&hba->clk_gating.ungate_work);
+		/*
+		 * fall through to check if we should wait for this
+		 * work to be done or not.
+		 */
+	case REQ_CLKS_ON:
+		if (async) {
+			rc = -EAGAIN;
+			hba->clk_gating.active_reqs--;
+			break;
+		}
+
 
 	dev_err(hba->dev, "UFS Host state=%d\n", hba->ufshcd_state);
 	dev_err(hba->dev, "lrb in use=0x%lx, outstanding reqs=0x%lx tasks=0x%lx\n",
@@ -7523,13 +7586,23 @@ static u32 ufshcd_get_max_icc_level(int sup_curr_uA, u32 start_scan, char *buff)
 static u32 ufshcd_find_max_sup_active_icc_level(struct ufs_hba *hba,
 							u8 *desc_buf, int len)
 {
+
 	u32 icc_level = 0;
+	u32 intr_status, enabled_intr_status = 0;
+	irqreturn_t retval = IRQ_NONE;
+	struct ufs_hba *hba = __hba;
+	int retries = hba->nutrs;
+
+	spin_lock(hba->host->host_lock);
+	intr_status = ufshcd_readl(hba, REG_INTERRUPT_STATUS);
+
 
 	/*
 	 * VCCQ rail is optional for removable UFS card and also most of the
 	 * vendors don't use this rail for embedded UFS devices as well. So
 	 * it is normal that VCCQ rail may not be provided for given platform.
 	 */
+
 	if (!hba->vreg_info.vcc || !hba->vreg_info.vccq2) {
 		dev_err(hba->dev, "%s: Regulator capability was not set, bActiveICCLevel=%d\n",
 			__func__, icc_level);
@@ -7541,6 +7614,20 @@ static u32 ufshcd_find_max_sup_active_icc_level(struct ufs_hba *hba,
 				hba->vreg_info.vcc->max_uA,
 				POWER_DESC_MAX_ACTV_ICC_LVLS - 1,
 				&desc_buf[PWR_DESC_ACTIVE_LVLS_VCC_0]);
+
+	while (intr_status && retries--) {
+		enabled_intr_status =
+			intr_status & ufshcd_readl(hba, REG_INTERRUPT_ENABLE);
+		if (intr_status)
+			ufshcd_writel(hba, intr_status, REG_INTERRUPT_STATUS);
+		if (enabled_intr_status) {
+			ufshcd_sl_intr(hba, enabled_intr_status);
+			retval = IRQ_HANDLED;
+		}
+
+		intr_status = ufshcd_readl(hba, REG_INTERRUPT_STATUS);
+	}
+
 
 	if (hba->vreg_info.vccq && hba->vreg_info.vccq->max_uA)
 		icc_level = ufshcd_get_max_icc_level(
